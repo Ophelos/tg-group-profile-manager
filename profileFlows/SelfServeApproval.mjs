@@ -1,6 +1,7 @@
 import {BaseProfile} from "./BaseProfile.mjs";
 import {SlackProfileManager} from "../SlackProfileManager.mjs";
 import { v4 as uuidv4 } from 'uuid';
+import {claimRevocation, releaseRevocation} from "../revocationGuard.mjs";
 
 
 
@@ -51,6 +52,19 @@ export class SelfServeApproval extends BaseProfile {
 
         app.message(/^#Scheduled Message Trigger#/, this.scheduledMessageTrigger.bind(this));
 
+    }
+
+    // Single place the Twingate API client is constructed, so the flow can be
+    // exercised in tests without reaching the Twingate API.
+    createProfileManager() {
+        return new SlackProfileManager();
+    }
+
+    // Duration labels this profile actually offers. When no `timeOptions` are
+    // configured the only valid duration is "Forever" (the modal omits the
+    // duration block entirely in that case).
+    allowedTimeOptions() {
+        return this.timeOptions.length > 0 ? this.timeOptions : ["Forever"];
     }
 
     async getAppHomeBlock(tgUser) {
@@ -204,7 +218,7 @@ export class SelfServeApproval extends BaseProfile {
 
     // Apply selfServe profile change
     async submitRequest(body, client, selectedGroup, selectedTime, reasonForRequest, tgUser, slackUserId) {
-        const profileManager = new SlackProfileManager(),
+        const profileManager = this.createProfileManager(),
             userGroupNames = tgUser.groups.map(userGroup => userGroup.name),
             groupId = await profileManager.lookupGroupByName(selectedGroup);
 
@@ -449,7 +463,7 @@ export class SelfServeApproval extends BaseProfile {
         await ack();
 
         const request = JSON.parse(body.actions[0].value)
-        const profileManager = new SlackProfileManager()
+        const profileManager = this.createProfileManager()
 
         // Make sure approver in the approver group of the profile
         const approver = await profileManager.lookupUserGroupByEmail(request.approverEmail);
@@ -617,9 +631,20 @@ export class SelfServeApproval extends BaseProfile {
             return
         }
 
+        // The catch-up sweep may already have revoked this grant. Taking the
+        // claim here keeps the revoke record, the notifications and the audit
+        // lines to exactly one per grant.
+        if (!claimRevocation(request.requestId)) return
+
         // remove user from group through twingate API
-        const profileManager = new SlackProfileManager()
-        await profileManager.removeUserFromGroup(request.requestedGroupId, request.requesterTwingateId)
+        const profileManager = this.createProfileManager()
+        try {
+            await profileManager.removeUserFromGroup(request.requestedGroupId, request.requesterTwingateId)
+        } catch (error) {
+            // Hand the claim back so the next sweep retries this grant.
+            releaseRevocation(request.requestId)
+            throw error
+        }
 
         // post duration access revoked message to self
         await client.chat.postMessage({

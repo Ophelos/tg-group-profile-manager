@@ -1,7 +1,8 @@
 {
   "main": "index.js",
   "scripts": {
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "test": "DEPLOY_ENV=docker node --test tests/"
   },
   "name": "slackbot",
   "version": "1.0.0",

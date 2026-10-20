@@ -6,6 +6,7 @@ import dotenvPkg from 'dotenv';
 import {accessSecretVersion} from "./utils.mjs";
 import {SlackProfileManager} from "./SlackProfileManager.mjs";
 import {SelfServeApproval} from "./profileFlows/SelfServeApproval.mjs";
+import {createExpirySweeper} from "./expirySweep.mjs";
 
 const {App} = boltPkg;
 const {subtype} = boltSubtype
@@ -55,32 +56,9 @@ async function loadProfiles(app) {
     return profileConfig;
 }
 
-async function startUpCleanUp (app) {
-    const botInfo = await app.client.auth.test()
-    const selfMessage = await app.client.chat.postMessage({channel: botInfo.user_id, text: "Service Started!"})
-    const conversations = await app.client.conversations.history({channel: selfMessage.channel, oldest: Number(selfMessage.ts)-(60*60*24*3)})
-    const grantMessages =  conversations.messages.filter(message => message.text.startsWith(SelfServeApproval.GRANT_ACCESS_MESSAGE)).map(message => JSON.parse(message.text.replace(SelfServeApproval.GRANT_ACCESS_MESSAGE, ""))) || []
-    const revokeMessages = conversations.messages.filter(message => message.text.startsWith(SelfServeApproval.REVOKE_ACCESS_MESSAGE)).map(message => JSON.parse(message.text.replace(SelfServeApproval.REVOKE_ACCESS_MESSAGE, ""))) || []
-    const revokeMessageIds = revokeMessages.map(revokeMessage => revokeMessage.requestId)
-    const missingRevokeMessages = grantMessages.filter(grantMessage => !revokeMessageIds.includes(grantMessage.requestId))
-
-    const profileManager = new SlackProfileManager()
-    const timeNow = Date.now()/1000
-    for (const missingRevokeMessage of missingRevokeMessages) {
-        if (missingRevokeMessage.expiry < timeNow) {
-            await profileManager.removeUserFromGroup(missingRevokeMessage.requestedGroupId, missingRevokeMessage.requesterTwingateId)
-            // post duration access revoked message to self
-            await app.client.chat.postMessage({
-                channel: botInfo.user_id,
-                text: `${SelfServeApproval.REVOKE_ACCESS_MESSAGE}${JSON.stringify(missingRevokeMessage)}`,
-            })
-            console.log(`User ${missingRevokeMessage.requesterEmail} profile _'${missingRevokeMessage.requestedProfile}'_ access expired but not yet revoked, revoking now. Group: ${missingRevokeMessage.requestedGroupName} Duration: ${missingRevokeMessage.selectedTime}`)
-        }
-    }
-}
-
 async function initApp(app) {
     const profileConfig = await loadProfiles(app);
+    app.expirySweeper = createExpirySweeper({app, profileConfig});
 
     const refreshHome = async function (userId, userEmail) {
         const homeView = await createHome(profileConfig, userEmail);
@@ -192,7 +170,24 @@ async function initApp(app) {
     console.log(`Healthcheck endpoint available at http://localhost:${process.env.PORT || port}/healthcheck`);
     // todo: confirm the block below is not preventing the bot to accept event in Cloudrun without no cpu throttling
     console.log(`Checking all expired duration based accesses are revoked.`)
-    await startUpCleanUp(app)
-    console.log(`All expired duration based accesses are revoked.`)
+    const sweepResult = await app.expirySweeper.runOnce()
+    console.log(`All expired duration based accesses are revoked. Scanned ${sweepResult.scanned} grant(s), revoked ${sweepResult.revoked}, failed ${sweepResult.failed}.`)
+
+    // Keep sweeping. Expiry otherwise depends on a single Slack scheduled
+    // message being delivered while the service happens to be up; if that
+    // delivery is missed the access is never revoked.
+    if (app.expirySweeper.intervalSeconds > 0) {
+        app.expirySweeper.start()
+        console.log(`Expiry catch-up sweep running every ${app.expirySweeper.intervalSeconds}s with a ${Math.round(app.expirySweeper.lookbackSeconds() / 86400)} day look-back.`)
+    } else {
+        console.warn(`Expiry catch-up sweep is disabled (EXPIRY_SWEEP_INTERVAL_SECONDS=0); expiry depends solely on Slack scheduled message delivery.`)
+    }
+
+    for (const signal of ["SIGTERM", "SIGINT"]) {
+        process.on(signal, () => {
+            app.expirySweeper.stop()
+            process.exit(0)
+        })
+    }
 
 })();

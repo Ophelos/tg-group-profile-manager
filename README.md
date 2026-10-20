@@ -14,6 +14,30 @@ Profiles can be configured in JSON and access to each profile can be restricted 
 ![change_group](./images/change_group.png)
 
 
+## Access expiry
+
+Time-bound access is revoked by a Slack scheduled message that the bot queues at grant time. That delivery is not guaranteed: if the service is down when it fires, Slack retries a few times and then gives up, and the access would never be revoked.
+
+A catch-up sweep is therefore run at startup *and* on an interval. It reads the bot's own DM channel, pairs every `#Duration Access Granted#` record with its `#Duration Access Revoked#` counterpart, and revokes anything that has expired without one.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `EXPIRY_SWEEP_INTERVAL_SECONDS` | `300` | How often the catch-up sweep runs. `0` disables it, leaving expiry dependent solely on Slack scheduled message delivery. |
+| `EXPIRY_SWEEP_LOOKBACK_MARGIN_DAYS` | `7` | Headroom above the longest duration any profile can grant. This is effectively the outage the sweep can recover from. |
+
+The look-back window is `max(3 days, longest grantable duration + margin)`, derived from the profiles' `timeOptions`, so adding a longer duration to a profile cannot silently leave grants unsweepable.
+
+The sweep and a delivered scheduled message can both act on the same grant. They are de-duplicated so a grant is revoked, recorded and notified exactly once.
+
+## Tests
+
+```shell
+npm install
+npm test
+```
+
+The suite runs on the Node.js built-in test runner and uses no network access.
+
 ## Prerequisites
 1. Slack Workspace (with admin access to deploy)
 2. A [Twingate](https://www.twingate.com/) account
