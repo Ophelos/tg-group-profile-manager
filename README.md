@@ -28,6 +28,27 @@ A catch-up sweep is therefore run at startup *and* on an interval. It reads the 
 The look-back window is `max(3 days, longest grantable duration + margin)`, derived from the profiles' `timeOptions`, so adding a longer duration to a profile cannot silently leave grants unsweepable.
 
 The sweep and a delivered scheduled message can both act on the same grant. They are de-duplicated so a grant is revoked, recorded and notified exactly once.
+## Direct message commands
+
+As well as the App Home tab, users can drive `selfServeApproval` profiles by sending the bot a direct message. Both surfaces call the same `SelfServeApproval.requestAccess()` function, so authorisation, approval routing, expiry scheduling and audit logging are identical either way.
+
+| Command | Description |
+| --- | --- |
+| `list` | The groups you may request, and the durations allowed for each. |
+| `request <group> <duration> <reason>` | Raise an access request. |
+| `help` | Show the commands and the quoting rule. |
+
+Group names that contain spaces must be wrapped in double quotes, and typed exactly as `list` shows them (em-dashes included):
+
+```
+request "Prod ArgoCD — JIT access" 8h investigating a failed sync
+```
+
+Single quotes and the typographic quotes some Slack clients substitute (`“ ”`, `‘ ’`) are accepted too. An unquoted group name also works when it unambiguously matches a group you can request. Durations accept either the short form used in `timeOptions` (`1h`, `8h`, `24h`, `7d`) or the long label (`8 Hours`, `7 Days`).
+
+Every message to the bot gets a reply: a malformed command, an unknown group or a duration the profile does not offer all return usage text rather than being silently ignored.
+
+To enable this, the Slack app's Messages tab must allow users to send messages (`features.app_home.messages_tab_read_only_enabled: false` in [manifest.yaml](./manifest.yml)), and the `message.im` bot event and `im:history` scope must be present — they already are in the supplied manifest.
 
 ## Tests
 

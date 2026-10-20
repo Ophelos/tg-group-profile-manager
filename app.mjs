@@ -1,5 +1,4 @@
 import boltPkg from '@slack/bolt';
-import boltSubtype from '@slack/bolt';
 import {createHome} from "./appHome.mjs";
 import {OneOfProfile} from "./profileFlows/OneOf.mjs";
 import dotenvPkg from 'dotenv';
@@ -7,9 +6,9 @@ import {accessSecretVersion} from "./utils.mjs";
 import {SlackProfileManager} from "./SlackProfileManager.mjs";
 import {SelfServeApproval} from "./profileFlows/SelfServeApproval.mjs";
 import {createExpirySweeper} from "./expirySweep.mjs";
+import {registerDmCommands} from "./dmCommands.mjs";
 
 const {App} = boltPkg;
-const {subtype} = boltSubtype
 dotenvPkg.config();
 
 async function loadProfiles(app) {
@@ -118,16 +117,9 @@ async function initApp(app) {
     });
 
 
-    // app.message("", async ({event, body, context, ack}) => {
-    //     await ack()
-    //     console.log()
-    // });
-
-    // app.message(subtype("bot_message"), async ({event, body, context, ack}) => {
-    //     console.log()
-    // });
-
-
+    // Direct message commands (`list`, `request`, `help`). These go through the
+    // same SelfServeApproval.requestAccess() path as the App Home modal.
+    registerDmCommands(app, profileConfig);
 }
 
 

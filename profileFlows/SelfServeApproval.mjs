@@ -10,28 +10,33 @@ export class SelfServeApproval extends BaseProfile {
     static GRANT_ACCESS_MESSAGE =  "#Duration Access Granted#";
     static MESSAGE_TRIGGER = "#Scheduled Message Trigger#"
 
+    // Maps the `timeOptions` keys used in the profile configuration to the
+    // human readable labels used everywhere else in the flow (and understood
+    // by `durationParser`).
+    static TIME_OPTIONS = {
+        "Forever" : "Forever",
+        "1h": "1 Hour",
+        "2h": "2 Hours",
+        "4h": "4 Hours",
+        "6h": "6 Hours",
+        "8h": "8 Hours",
+        "12h": "12 Hours",
+        "24h": "24 Hours",
+        "2d": "2 Days",
+        "3d": "3 Days",
+        "4d": "4 Days",
+        "5d": "5 Days",
+        "6d": "6 Days",
+        "7d": "7 Days",
+        "14d": "14 Days",
+        "21d": "21 Days",
+        "30d": "30 Days",
+        "60d": "60 Days",
+        "90d": "90 Days"
+    }
+
     constructor(app, profileConfig, index) {
-        const timeOptions = {
-            "Forever" : "Forever",
-            "1h": "1 Hour",
-            "2h": "2 Hours",
-            "4h": "4 Hours",
-            "6h": "6 Hours",
-            "8h": "8 Hours",
-            "12h": "12 Hours",
-            "24h": "24 Hours",
-            "2d": "2 Days",
-            "3d": "3 Days",
-            "4d": "4 Days",
-            "5d": "5 Days",
-            "6d": "6 Days",
-            "7d": "7 Days",
-            "14d": "14 Days",
-            "21d": "21 Days",
-            "30d": "30 Days",
-            "60d": "60 Days",
-            "90d": "90 Days"
-        }
+        const timeOptions = SelfServeApproval.TIME_OPTIONS;
         profileConfig.title = 'Request Access';
         super(app, profileConfig, index)
         this.openModalBlock.blocks[0].text.text = 'Which group would you like to request access to?';
@@ -190,34 +195,71 @@ export class SelfServeApproval extends BaseProfile {
         }
 
         try {
-            const tgUser = await this.app.lookupTgUserFromSlackUserId(body.user.id);
-            const userGroupNames = tgUser.groups.map(group => group.name)
+            const result = await this.requestAccess({
+                client,
+                slackUserId: body.user.id,
+                selectedGroup: selectedOption,
+                selectedTime,
+                reasonForRequest
+            });
 
-            // Make sure user is allowed to access profile
-            if (!userGroupNames.includes(this.applicableToGroup)) {
-                logger.error(new Error(`User '${tgUser.email}' has no access to profile '${this.profileName}'`));
+            if (!result.ok) {
+                logger.error(new Error(result.error));
                 return;
             }
 
-            //todo: check the profile contains the time option
-
-            // Make sure user is allowed to access selected group
-            if (typeof selectedOption === "string" && !this.groups.includes(selectedOption)) {
-                logger.error(new Error(`User '${tgUser.email}' not allowed to access requested group '${selectedOption}' in profile '${this.profileName}'`));
-                return;
-            }
-
-            await this.submitRequest(body, client, selectedOption, selectedTime, reasonForRequest, tgUser, body.user.id);
-
-            await this.app.refreshHome(body.user.id, tgUser.email);
+            await this.app.refreshHome(body.user.id, result.tgUser.email);
         } catch (error) {
             logger.error(error);
         }
 
     }
 
+    /**
+     * The single entry point for submitting an access request.
+     *
+     * Every surface that can raise a request - the App Home modal
+     * (`submitAccessRequest`) and the direct message command handler - must go
+     * through here so that authorisation, duration validation, approval
+     * routing, expiry scheduling and audit logging stay identical regardless of
+     * where the request came from.
+     *
+     * Returns `{ok: true, tgUser, selfApproved}` on success, or
+     * `{ok: false, error}` with a user-presentable reason on refusal. It never
+     * throws for an ordinary refusal, so callers can always answer the user.
+     */
+    async requestAccess({client, slackUserId, selectedGroup, selectedTime, reasonForRequest}) {
+        const tgUser = await this.app.lookupTgUserFromSlackUserId(slackUserId);
+
+        if (!tgUser) {
+            return {ok: false, error: `Your Slack email address was not found in Twingate. Please make sure your Slack and Twingate email addresses match.`};
+        }
+
+        const userGroupNames = tgUser.groups.map(group => group.name);
+
+        // Make sure user is allowed to access profile
+        if (!userGroupNames.includes(this.applicableToGroup)) {
+            return {ok: false, error: `User '${tgUser.email}' has no access to profile '${this.profileName}'`};
+        }
+
+        // Make sure user is allowed to access selected group
+        if (typeof selectedGroup === "string" && !this.groups.includes(selectedGroup)) {
+            return {ok: false, error: `User '${tgUser.email}' not allowed to access requested group '${selectedGroup}' in profile '${this.profileName}'`};
+        }
+
+        // Make sure the profile actually offers the requested duration
+        const allowedTimeOptions = this.allowedTimeOptions();
+        if (!allowedTimeOptions.includes(selectedTime)) {
+            return {ok: false, error: `Duration '${selectedTime}' is not available in profile '${this.profileName}'. Available durations: ${allowedTimeOptions.join(", ")}`};
+        }
+
+        await this.submitRequest(client, selectedGroup, selectedTime, reasonForRequest, tgUser, slackUserId);
+
+        return {ok: true, tgUser, selfApproved: userGroupNames.includes(this.approverGroup)};
+    }
+
     // Apply selfServe profile change
-    async submitRequest(body, client, selectedGroup, selectedTime, reasonForRequest, tgUser, slackUserId) {
+    async submitRequest(client, selectedGroup, selectedTime, reasonForRequest, tgUser, slackUserId) {
         const profileManager = this.createProfileManager(),
             userGroupNames = tgUser.groups.map(userGroup => userGroup.name),
             groupId = await profileManager.lookupGroupByName(selectedGroup);
