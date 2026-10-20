@@ -81,9 +81,17 @@ jobs:
 
       - name: Report the digest to pin
         if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          echo "### Image published" >> "$GITHUB_STEP_SUMMARY"
-          echo '' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Tag: `'"${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}"'`' >> "$GITHUB_STEP_SUMMARY"
-          echo '' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Pin by digest: `'"${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"'`' >> "$GITHUB_STEP_SUMMARY"
+          # Image references must be lowercase; github.repository keeps the
+          # owner's capitalisation (e.g. "Ophelos/...").
+          image="${REGISTRY}/${IMAGE_NAME,,}"
+          {
+            echo "### Image published"
+            echo ""
+            echo "Tag: \`${image}:sha-${GITHUB_SHA}\`"
+            echo ""
+            echo "Pin by digest: \`${image}@${DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Pin by digest: ${image}@${DIGEST}"
