@@ -1,0 +1,22 @@
+tg-group-profile-manager
+Copyright Twingate, Inc. and contributors
+
+This product includes software developed at Twingate, Inc.
+(https://github.com/Twingate-Labs/tg-group-profile-manager), licensed
+under the Apache License, Version 2.0. See LICENSE.md.
+
+This repository is a fork maintained by Ophelos Ltd. Modifications made
+by Ophelos Ltd are likewise licensed under the Apache License, Version
+2.0.
+
+Changes relative to upstream:
+- Fixed time-bound access never being revoked when the expiry message
+  was missed: the catch-up sweep now derives its look-back from the
+  configured timeOptions, paginates, tolerates malformed messages, and
+  runs on an interval rather than only at startup.
+- Direct message commands (`list`, `request`, `help`) for
+  selfServeApproval profiles, sharing the App Home grant path.
+- Duration validation against the profile's configured timeOptions.
+- A unit test suite and a GHCR workflow publishing SHA-tagged images.
+
+Both changes have been offered upstream.
