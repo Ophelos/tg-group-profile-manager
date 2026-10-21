@@ -55,10 +55,12 @@ function stripSlackMarkup(text) {
  * `command: "unknown"` so the caller can answer with usage text.
  */
 export function parseCommand(text) {
-    // Commands are single-line. Clients such as the Claude Slack connector
-    // append an attribution footer ("*Sent using* <@U…|Claude>") on a new line,
-    // which must not be read as the group name or reason.
-    const [firstLine = ""] = String(text ?? "").trim().split(/\r?\n/);
+    // Clients such as the Claude Slack connector append an attribution footer
+    // ("*Sent using* <@U…|Claude>"), sometimes on the same line as the command,
+    // which must not be read as the group name or reason. Commands are also
+    // single-line, so anything after the first line is ignored.
+    const withoutFooter = String(text ?? "").replace(/\s*[*_]{0,2}Sent using[*_]{0,2}\s*<@[^>]*>\s*$/i, "");
+    const [firstLine = ""] = withoutFooter.trim().split(/\r?\n/);
     const cleaned = normaliseQuotes(stripSlackMarkup(firstLine)).trim();
     if (cleaned === "") return {command: "unknown", verb: "", rawArgs: ""};
 

@@ -475,4 +475,12 @@ test("parseCommand ignores the Claude Slack connector's attribution footer", () 
     assert.equal(full.command, "request");
     assert.equal(full.rawArgs, '"jit-test-crd" 1h DM path test');
     assert.equal(parseCommand("list" + footer).command, "list");
+
+    // Slack can deliver the footer on the same line as the command.
+    const sameLine = " *Sent using* <@U0ABNH7HS77|Claude>";
+    const bareSameLine = parseCommand("request" + sameLine);
+    assert.equal(bareSameLine.command, "request");
+    assert.equal(bareSameLine.rawArgs, "");
+    const fullSameLine = parseCommand('request "jit-test-crd" 1h DM path test' + sameLine);
+    assert.equal(fullSameLine.rawArgs, '"jit-test-crd" 1h DM path test');
 });
