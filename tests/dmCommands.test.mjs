@@ -465,3 +465,14 @@ test("the DM path calls the same requestAccess/submitRequest used by the modal",
     assert.equal(grants[1].requestedGroupName, DB_GROUP);
     assert.equal(ctx.client.calls.scheduleMessage.length, 2);
 });
+
+test("parseCommand ignores the Claude Slack connector's attribution footer", () => {
+    const footer = "\n*Sent using* <@U0ABNH7HS77|Claude>";
+    const bare = parseCommand("request" + footer);
+    assert.equal(bare.command, "request");
+    assert.equal(bare.rawArgs, "");
+    const full = parseCommand('request "jit-test-crd" 1h DM path test' + footer);
+    assert.equal(full.command, "request");
+    assert.equal(full.rawArgs, '"jit-test-crd" 1h DM path test');
+    assert.equal(parseCommand("list" + footer).command, "list");
+});
