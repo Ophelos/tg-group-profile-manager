@@ -43,6 +43,13 @@ export class SelfServeApproval extends BaseProfile {
         this.timeOptions = this.timeOptions || [];
         this.timeOptions = this.timeOptions.filter(option => Object.keys(timeOptions).includes(option)).map(option => timeOptions[option])
         this.groups = this.groups || [];
+        // Optional Slack channel ID. When set, approval requests are posted to
+        // this channel once instead of being DMed to every approver.
+        this.approvalChannel = this.approvalChannel || null;
+        // Decisions taken on pending requests in this process, keyed by the
+        // approval message(s). Guards against a request being approved or
+        // rejected twice (two approvers clicking at once, or a stale button).
+        this.decisions = new Map();
         // Called when user selects a selfServe profile
         app.action(`select_profile-${index}`, this.selectProfile.bind(this));
 
@@ -205,6 +212,11 @@ export class SelfServeApproval extends BaseProfile {
 
             if (!result.ok) {
                 logger.error(new Error(result.error));
+                // The DM command path replies with result.error itself; the
+                // modal has no reply channel, so DM the requester here.
+                if (result.routingFailed) {
+                    await client.chat.postMessage({channel: body.user.id, text: result.error});
+                }
                 return;
             }
 
@@ -253,7 +265,13 @@ export class SelfServeApproval extends BaseProfile {
             return {ok: false, error: `Duration '${selectedTime}' is not available in profile '${this.profileName}'. Available durations: ${allowedTimeOptions.join(", ")}`};
         }
 
-        await this.submitRequest(client, selectedGroup, selectedTime, reasonForRequest, tgUser, slackUserId);
+        const submitted = await this.submitRequest(client, selectedGroup, selectedTime, reasonForRequest, tgUser, slackUserId);
+
+        // The request could not be delivered to the approvers. Report it so the
+        // requester is never left waiting on a request nobody can see.
+        if (submitted && submitted.routed === false) {
+            return {ok: false, error: submitted.error, routingFailed: true, tgUser};
+        }
 
         return {ok: true, tgUser, selfApproved: userGroupNames.includes(this.approverGroup)};
     }
@@ -328,10 +346,19 @@ export class SelfServeApproval extends BaseProfile {
                 ]
             }
             await client.chat.postMessage(msgOption)
-            return
+
+            // Keep self-approved access visible to the team.
+            if (this.approvalChannel) {
+                await this.postSelfApprovalNotice(client, request)
+            }
+            return {routed: true}
         }
 
         // the user is not part of the approver group
+        if (this.approvalChannel) {
+            return await this.routeToApprovalChannel(client, {selectedGroup, selectedTime, reasonForRequest, tgUser, slackUserId, groupId})
+        }
+
         const approverGroup = await profileManager.lookUpGroupUsersByName(this.approverGroup)
         let msgOption = {}
         let approverResponses = []
@@ -377,71 +404,7 @@ export class SelfServeApproval extends BaseProfile {
             // setting up the msgOption for adding button to the message
             msgOption.ts = response.ts
             msgOption.channel = response.channel
-            msgOption.blocks.push(
-                {
-                    type: 'actions',
-                    elements: [
-                        {
-                            action_id: `approve_request-${this.profileIndex}`,
-                            type: 'button',
-                            text: {
-                                type: 'plain_text',
-                                text: 'Approve',
-                                emoji: true
-                            },
-                            style: 'primary',
-                            confirm: {
-                                "title": {
-                                    "type": "plain_text",
-                                    "text": "Are you sure?"
-                                },
-                                "text": {
-                                    "type": "mrkdwn",
-                                    "text": `Are you sure you want to APPROVE the request to add user <@${slackUserId}> to the Twingate group '${selectedGroup}' for '${selectedTime}'?`
-                                },
-                                "confirm": {
-                                    "type": "plain_text",
-                                    "text": "Confirm"
-                                },
-                                "deny": {
-                                    "type": "plain_text",
-                                    "text": "Stop, I've changed my mind!"
-                                }
-                            },
-                            value: request
-                        },
-                        {
-                            action_id: `reject_request-${this.profileIndex}`,
-                            type: 'button',
-                            text: {
-                                type: 'plain_text',
-                                text: 'Reject',
-                                emoji: true
-                            },
-                            style: 'danger',
-                            confirm: {
-                                "title": {
-                                    "type": "plain_text",
-                                    "text": "Are you sure?"
-                                },
-                                "text": {
-                                    "type": "mrkdwn",
-                                    "text": `Are you sure you want to REJECT the request to add user <@${slackUserId}> to the Twingate group '${selectedGroup}' for '${selectedTime}'?`
-                                },
-                                "confirm": {
-                                    "type": "plain_text",
-                                    "text": "Confirm"
-                                },
-                                "deny": {
-                                    "type": "plain_text",
-                                    "text": "Stop, I've changed my mind!"
-                                }
-                            },
-                            value: request
-                        }
-                    ]
-                }
-            )
+            msgOption.blocks.push(this.approvalActionsBlock(request, slackUserId, selectedGroup, selectedTime))
             approverResponses.push ([response.channel, response.ts])
             approverMessages.push(msgOption)
         }
@@ -497,7 +460,197 @@ export class SelfServeApproval extends BaseProfile {
             status: "Access Pending Approval"
         }
         console.log(JSON.stringify(request))
+        return {routed: true}
     };
+
+    // The Approve / Reject buttons attached to an approval request message.
+    // `value` is the request payload (an object for the DM flow, which
+    // stringifies it later, or an already-stringified payload).
+    approvalActionsBlock(value, slackUserId, selectedGroup, selectedTime) {
+        const button = (verb, actionPrefix, label, style) => ({
+            action_id: `${actionPrefix}-${this.profileIndex}`,
+            type: 'button',
+            text: {
+                type: 'plain_text',
+                text: label,
+                emoji: true
+            },
+            style,
+            confirm: {
+                "title": {
+                    "type": "plain_text",
+                    "text": "Are you sure?"
+                },
+                "text": {
+                    "type": "mrkdwn",
+                    "text": `Are you sure you want to ${verb} the request to add user <@${slackUserId}> to the Twingate group '${selectedGroup}' for '${selectedTime}'?`
+                },
+                "confirm": {
+                    "type": "plain_text",
+                    "text": "Confirm"
+                },
+                "deny": {
+                    "type": "plain_text",
+                    "text": "Stop, I've changed my mind!"
+                }
+            },
+            value
+        });
+        return {
+            type: 'actions',
+            elements: [
+                button("APPROVE", "approve_request", "Approve", "primary"),
+                button("REJECT", "reject_request", "Reject", "danger")
+            ]
+        };
+    }
+
+    channelRequestText(request) {
+        return `<@${request.requesterSlackId}> is requesting access through profile _'${this.profileName}'_.\nGroup: ${request.requestedGroupName}\nDuration: ${request.selectedTime} (Start from the time of approval)\nReason For Request: ${request.reasonForRequest}\n_Only members of ${this.approverGroup} can approve._`
+    }
+
+    // Post a non-self-approved request to `approvalChannel` once, with buttons.
+    // Returns {routed: true} or {routed: false, error} so the requester is told
+    // when the request could not be delivered.
+    async routeToApprovalChannel(client, {selectedGroup, selectedTime, reasonForRequest, tgUser, slackUserId, groupId}) {
+        const request = {
+            requestId: uuidv4(),
+            requestedProfile: this.profileName,
+            requestedProfileType: this.profileType,
+            approverGroup: this.approverGroup,
+            approvalChannel: this.approvalChannel,
+            requesterTwingateId: tgUser.id,
+            requesterEmail: tgUser.email,
+            requesterSlackId: slackUserId,
+            requestedGroupName: selectedGroup,
+            requestedGroupId: groupId,
+            reasonForRequest: reasonForRequest,
+            selectedTime: selectedTime,
+            selfApproval: false
+        }
+        const messageString = this.channelRequestText(request)
+        const section = {type: 'section', text: {type: 'mrkdwn', text: messageString}}
+
+        try {
+            const response = await client.chat.postMessage({
+                channel: this.approvalChannel,
+                text: messageString,
+                blocks: [section]
+            })
+            // The buttons carry the message's own channel/ts so the decision
+            // can update it, the same way the DM flow tracks its messages.
+            request.approverMessages = [[response.channel, response.ts]]
+            await client.chat.update({
+                channel: response.channel,
+                ts: response.ts,
+                text: messageString,
+                blocks: [section, this.approvalActionsBlock(JSON.stringify(request), slackUserId, selectedGroup, selectedTime)]
+            })
+        } catch (error) {
+            const reason = (error && error.data && error.data.error) || (error && error.message) || String(error)
+            console.error(new Error(`Could not post access request for '${tgUser.email}' to approval channel '${this.approvalChannel}' of profile '${this.profileName}': ${reason}`))
+            const requestObj = (({ requestId, ...o }) => o)(request)
+            requestObj.status = "Request Routing Failed"
+            requestObj.routingError = reason
+            console.log(JSON.stringify(requestObj))
+            return {
+                routed: false,
+                error: `Your access request for '${selectedGroup}' could not be routed to the approvers (Slack error: ${reason}). Nothing has been granted. Please tell the platform team, or try again later.`
+            }
+        }
+
+        // requester slack message
+        const requesterString = `Group access request through profile _'${this.profileName}'_ has been sent to <#${this.approvalChannel}> for approval.\nGroup: ${selectedGroup}\nDuration: ${selectedTime} (Start from the time of approval)\nA new Slack message will be sent to you once the request is approved/rejected.`
+        await client.chat.postMessage({
+            channel: slackUserId,
+            text: requesterString,
+            blocks: [{type: 'section', text: {type: 'mrkdwn', text: requesterString}}]
+        })
+
+        const requestObj = (({ requestId, approverMessages, ...o }) => o)(request)
+        requestObj.status = "Access Pending Approval"
+        console.log(JSON.stringify(requestObj))
+        return {routed: true}
+    }
+
+    // FYI to `approvalChannel` when an approver grants themselves access.
+    // The grant has already happened, so a failure here is reported, not fatal.
+    async postSelfApprovalNotice(client, request) {
+        const messageString = `<@${request.requesterSlackId}> self-approved access through profile _'${this.profileName}'_.\nGroup: ${request.requestedGroupName}\nDuration: ${request.selectedTime}\nReason For Request: ${request.reasonForRequest}\n\`Self Approved\``
+        try {
+            await client.chat.postMessage({
+                channel: this.approvalChannel,
+                text: messageString,
+                blocks: [{type: 'section', text: {type: 'mrkdwn', text: messageString}}]
+            })
+        } catch (error) {
+            const reason = (error && error.data && error.data.error) || (error && error.message) || String(error)
+            console.error(new Error(`Could not post self-approval notice for '${request.requesterEmail}' to approval channel '${this.approvalChannel}' of profile '${this.profileName}': ${reason}`))
+            try {
+                await client.chat.postMessage({
+                    channel: request.requesterSlackId,
+                    text: `Your access was granted, but the notice to <#${this.approvalChannel}> failed (Slack error: ${reason}). Please let the team know you self-approved '${request.requestedGroupName}'.`
+                })
+            } catch (e) {
+                console.error(e)
+            }
+        }
+    }
+
+    // Reply only to the person who clicked a button.
+    async notifyClicker(client, body, text, logger) {
+        try {
+            if (body.channel && body.channel.id) {
+                await client.chat.postEphemeral({channel: body.channel.id, user: body.user.id, text})
+            } else {
+                await client.chat.postMessage({channel: body.user.id, text})
+            }
+        } catch (e) {
+            logger.error(e)
+        }
+    }
+
+    // Returns null when the clicker may decide this request, otherwise the
+    // reason they may not. Checks the person who clicked, never the payload.
+    async approverRefusal(clickerSlackId, request) {
+        const onlyApprovers = `Only members of ${this.approverGroup} can approve or reject this request.`
+        const ownRequest = "You can't approve or reject your own access request."
+
+        if (clickerSlackId === request.requesterSlackId) return {message: ownRequest, log: `Requester ${clickerSlackId} tried to decide their own request`}
+
+        let clicker = null
+        try {
+            clicker = await this.app.lookupTgUserFromSlackUserId(clickerSlackId)
+        } catch (error) {
+            return {message: `${onlyApprovers} Your Twingate account could not be checked, please try again.`, log: `Could not resolve clicker ${clickerSlackId}: ${error && error.message}`}
+        }
+        if (!clicker) return {message: onlyApprovers, log: `Clicker ${clickerSlackId} not found in Twingate`}
+
+        if (clicker.id === request.requesterTwingateId || clicker.email === request.requesterEmail) {
+            return {message: ownRequest, log: `Requester '${clicker.email}' tried to decide their own request`}
+        }
+
+        const clickerGroupNames = (clicker.groups || []).map(group => group.name)
+        if (!clickerGroupNames.includes(this.approverGroup)) {
+            return {message: onlyApprovers, log: `'${clicker.email}' is not in the approver group '${this.approverGroup}' of profile '${this.profileName}'`}
+        }
+        return null
+    }
+
+    // One key per pending request: every approval message (DM or channel)
+    // carries the same `approverMessages` list.
+    decisionKey(request) {
+        const first = Array.isArray(request.approverMessages) && request.approverMessages[0]
+        return first ? `${first[0]}:${first[1]}` : request.requestId
+    }
+
+    decisionLine(request, verb, slackUserId) {
+        if (request.approvalChannel) {
+            const now = Math.round(Date.now() / 1000)
+            return `\n\`${verb} by\` <@${slackUserId}> at <!date^${now}^{date_short_pretty} {time}|${new Date(now * 1000).toISOString()}>`
+        }
+        return ` \n\`${verb} By\` <@${slackUserId}>`
+    }
 
 
     // called when an approver approves or rejects a request
@@ -505,22 +658,46 @@ export class SelfServeApproval extends BaseProfile {
         await ack();
 
         const request = JSON.parse(body.actions[0].value)
-        const profileManager = this.createProfileManager()
+        const isReject = body.actions[0].action_id.startsWith("reject_request")
 
-        // Make sure approver in the approver group of the profile
-        const approver = await profileManager.lookupUserGroupByEmail(request.approverEmail);
-        const approverGroupNames = approver.groups.map(group => group.name)
-        if (!approverGroupNames.includes(this.approverGroup)) {
-            logger.error(new Error(`Approver '${request.approverEmail}' is not in the approver group '${this.approverGroup}' of profile '${this.profileName}'`));
+        // Make sure the person who clicked is in the approver group of the
+        // profile and is not the requester.
+        const refusal = await this.approverRefusal(body.user.id, request)
+        if (refusal) {
+            logger.error(new Error(refusal.log));
+            await this.notifyClicker(client, body, refusal.message, logger);
             return;
         }
+
+        // Only the first decision on a request counts.
+        const key = this.decisionKey(request)
+        const prior = this.decisions.get(key)
+        if (prior) {
+            await this.notifyClicker(client, body, `This request was already ${prior.decision} by <@${prior.by}>.`, logger);
+            return;
+        }
+        this.decisions.set(key, {decision: isReject ? "rejected" : "approved", by: body.user.id})
+
+        const progress = {committed: false}
+        try {
+            const handled = await this.applyDecision({client, body, logger, request, isReject, progress})
+            if (!handled) this.decisions.delete(key)
+        } catch (error) {
+            // Let a later click retry, unless the decision already took effect.
+            if (!progress.committed) this.decisions.delete(key)
+            throw error
+        }
+    }
+
+    async applyDecision({client, body, logger, request, isReject, progress = {}}) {
+        const profileManager = this.createProfileManager()
 
         // Make sure requester has profile access
         const requester = await profileManager.lookupUserGroupByEmail(request.requesterEmail);
         const requesterGroupNames = requester.groups.map(group => group.name)
         if (!requesterGroupNames.includes(this.applicableToGroup)) {
             logger.error(new Error(`User '${request.requesterEmail}' has no access to profile '${this.profileName}'`));
-            return;
+            return false;
         }
 
 
@@ -529,11 +706,12 @@ export class SelfServeApproval extends BaseProfile {
         const approvers = request.approverMessages
 
         // request rejected
-        if (body.actions[0].action_id.startsWith("reject_request")) {
+        if (isReject) {
+            progress.committed = true
             // sending all approvers the rejected message
             for (const approver of approvers) {
                 try {
-                    let messageString = `<@${request.requesterSlackId}> is requesting access through profile _'${this.profileName}'_.\nGroup: ${request.requestedGroupName}\nDuration: ${request.selectedTime} (Start from the time of approval)\nReason For Request: ${reasonForRequest} \n\`Rejected By\` <@${body.user.id}>`
+                    let messageString = `<@${request.requesterSlackId}> is requesting access through profile _'${this.profileName}'_.\nGroup: ${request.requestedGroupName}\nDuration: ${request.selectedTime} (Start from the time of approval)\nReason For Request: ${reasonForRequest}${this.decisionLine(request, "Rejected", body.user.id)}`
                     msgOption = {
                         channel: approver[0],
                         ts: approver[1],
@@ -602,11 +780,12 @@ export class SelfServeApproval extends BaseProfile {
 
             // send the twingate api request
             await profileManager.addUserToGroup(request.requestedGroupId, request.requesterTwingateId)
+            progress.committed = true
 
             // sending all approvers the approved message
             for (const approver of approvers) {
                 try {
-                    let messageString = `<@${request.requesterSlackId}> is requesting access through profile _'${this.profileName}'_.\nGroup: ${request.requestedGroupName}\nDuration: ${request.selectedTime} (Start from the time of approval)\nReason For Request: ${reasonForRequest} \n\`Approved By\` <@${body.user.id}>`
+                    let messageString = `<@${request.requesterSlackId}> is requesting access through profile _'${this.profileName}'_.\nGroup: ${request.requestedGroupName}\nDuration: ${request.selectedTime} (Start from the time of approval)\nReason For Request: ${reasonForRequest}${this.decisionLine(request, "Approved", body.user.id)}`
                     msgOption = {
                         channel: approver[0],
                         ts: approver[1],
@@ -657,6 +836,7 @@ export class SelfServeApproval extends BaseProfile {
             }
             await client.chat.postMessage(msgOption)
         }
+        return true
     }
 
     async scheduledMessageTrigger({event, client, body, context, ack, logger}) {
