@@ -2,7 +2,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "nodemon index.js",
-    "test": "DEPLOY_ENV=docker node --test tests/dmCommands.test.mjs tests/expirySweep.test.mjs"
+    "test": "DEPLOY_ENV=docker node --test tests/dmCommands.test.mjs tests/expirySweep.test.mjs tests/approvalChannel.test.mjs"
   },
   "name": "slackbot",
   "version": "1.0.0",
