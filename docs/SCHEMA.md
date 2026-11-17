@@ -81,3 +81,24 @@ Setting `approvalChannel` on a `selfServeApproval` profile sends its approval re
 * Anyone in the channel can see the request, but a click is only accepted from a member of `approverGroup`. The bot resolves the clicker's Slack email to their Twingate user and checks their group membership at the time of the click. Everyone else, including the requester, gets an ephemeral refusal and nothing changes. The same check applies to approval DMs when `approvalChannel` is not set.
 * The first decision wins. The channel message is updated to show who approved or rejected it and when, and the buttons are removed. A later click on the same request gets an ephemeral "already approved/rejected" notice and grants nothing.
 * If the bot cannot post to the channel (for example `not_in_channel` because it has not been invited), nothing is granted, the error is logged, and the requester is told that the request could not be routed. The bot does not fall back to DMs.
+
+### Groups by name suffix
+Setting `groupNameSuffixes` on a `selfServeApproval` profile offers, in addition to the exact `groups`, every Twingate group whose name ends with one of the listed suffixes. The groups are read live from the Twingate API each time the profile lists or validates a request, so a new matching group is requestable without a config change or a restart.
+
+```json
+{
+  "profileName": "Ophelos Production JIT",
+  "profileType": "selfServeApproval",
+  "groups": ["Prod ArgoCD — JIT access"],
+  "groupNameSuffixes": [" self-serve — JIT access"],
+  "timeOptions": ["1h", "8h", "24h", "7d"],
+  "applicableToGroup": "Everyone",
+  "approverGroup": "Ophelos Platform Team"
+}
+```
+
+* Matching is a plain, case-sensitive "name ends with suffix", and something must precede the suffix. It is never a pattern. The suffix is matched character for character, so an em dash (U+2014) does not match a hyphen or an en dash, and a leading space in the suffix matters. A blank suffix is ignored (it would match every group).
+* With the field absent the profile behaves exactly as before: only the exact `groups`.
+* Approval still goes to `approverGroup`, and the durations are still `timeOptions`. Nothing else about the request changes.
+* The bot's Twingate API key covers the whole tenant, so a suffix widens what is requestable to any group with that name. Only create such groups deliberately.
+* If the Twingate group list cannot be read, only the exact `groups` are offered.

@@ -172,12 +172,12 @@ function usage(message) {
     return `${message}\n\n${HELP_TEXT}`;
 }
 
-function listText(profiles, tgUser) {
+function listText(profiles, tgUser, groupsByProfile) {
     const userGroupNames = tgUser.groups.map(group => group.name);
     const lines = [];
 
     for (const profile of profiles) {
-        const requestable = profile.groups.filter(group => !userGroupNames.includes(group));
+        const requestable = groupsByProfile.get(profile).filter(group => !userGroupNames.includes(group));
         lines.push(`*${profile.profileName}*`);
         if (requestable.length === 0) {
             lines.push("  _You already have every group in this profile._");
@@ -222,7 +222,13 @@ export async function handleDmCommand({text, slackUserId, client, app, profileCo
 
     const profiles = permittedSelfServeProfiles(profileConfig, tgUser);
 
-    if (parsed.command === "list") return listText(profiles, tgUser);
+    // The groups each profile offers (exact list plus any suffix matches read
+    // live from Twingate), resolved once per command.
+    const groupsByProfile = new Map(await Promise.all(
+        profiles.map(async profile => [profile, await profile.resolveGroups()])
+    ));
+
+    if (parsed.command === "list") return listText(profiles, tgUser, groupsByProfile);
 
     if (parsed.command === "unknown") {
         const said = parsed.verb ? `I did not understand \`${parsed.verb}\`.` : "I did not understand that.";
@@ -234,12 +240,12 @@ export async function handleDmCommand({text, slackUserId, client, app, profileCo
         return usage("`request` needs a group, a duration and a reason.");
     }
 
-    const knownGroupNames = [...new Set(profiles.flatMap(profile => profile.groups))];
+    const knownGroupNames = [...new Set(profiles.flatMap(profile => groupsByProfile.get(profile)))];
     const groupResult = extractGroupName(parsed.rawArgs, knownGroupNames);
     if (groupResult.error) return usage(groupResult.error);
 
     const matchingProfiles = profiles.filter(profile =>
-        profile.groups.some(group => groupKey(group) === groupKey(groupResult.group))
+        groupsByProfile.get(profile).some(group => groupKey(group) === groupKey(groupResult.group))
     );
 
     if (matchingProfiles.length === 0) {
@@ -250,7 +256,7 @@ export async function handleDmCommand({text, slackUserId, client, app, profileCo
     }
 
     const profile = matchingProfiles[0];
-    const canonicalGroup = profile.groups.find(group => groupKey(group) === groupKey(groupResult.group));
+    const canonicalGroup = groupsByProfile.get(profile).find(group => groupKey(group) === groupKey(groupResult.group));
 
     const durationResult = extractDuration(groupResult.rest);
     if (durationResult.error) {
