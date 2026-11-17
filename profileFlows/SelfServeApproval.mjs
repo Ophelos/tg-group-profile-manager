@@ -43,6 +43,14 @@ export class SelfServeApproval extends BaseProfile {
         this.timeOptions = this.timeOptions || [];
         this.timeOptions = this.timeOptions.filter(option => Object.keys(timeOptions).includes(option)).map(option => timeOptions[option])
         this.groups = this.groups || [];
+        // Optional list of group name suffixes. Besides the exact `groups`, the
+        // profile offers every Twingate group whose name ends with one of
+        // these, read live from the Twingate API. Matching is a plain
+        // `endsWith` (never a pattern from config). A blank entry, which would
+        // match every group, is dropped.
+        this.groupNameSuffixes = Array.isArray(this.groupNameSuffixes)
+            ? this.groupNameSuffixes.filter(suffix => typeof suffix === "string" && suffix.trim() !== "")
+            : [];
         // Optional Slack channel ID. When set, approval requests are posted to
         // this channel once instead of being DMed to every approver.
         this.approvalChannel = this.approvalChannel || null;
@@ -79,9 +87,34 @@ export class SelfServeApproval extends BaseProfile {
         return this.timeOptions.length > 0 ? this.timeOptions : ["Forever"];
     }
 
+    // True when `name` ends with one of `suffixes` and has something before it.
+    static matchesSuffix(name, suffixes) {
+        return typeof name === "string" && suffixes.some(suffix => name.length > suffix.length && name.endsWith(suffix));
+    }
+
+    // Every group this profile offers: the exact `groups` list first, then
+    // (when `groupNameSuffixes` is set) the Twingate groups whose name ends with
+    // a configured suffix, read live at call time. Behaves exactly as `groups`
+    // when no suffix is configured. If Twingate cannot be read, only the exact
+    // list is offered (fail closed).
+    async resolveGroups() {
+        if (this.groupNameSuffixes.length === 0) return [...this.groups];
+        let names;
+        try {
+            names = await this.createProfileManager().listGroupNames();
+        } catch (error) {
+            console.error(`Could not list Twingate groups for profile '${this.profileName}'; offering only the exact groups.`, error);
+            return [...this.groups];
+        }
+        const matched = [...new Set(names)]
+            .filter(name => SelfServeApproval.matchesSuffix(name, this.groupNameSuffixes) && !this.groups.includes(name))
+            .sort();
+        return [...this.groups, ...matched];
+    }
+
     async getAppHomeBlock(tgUser) {
         const userGroupNames = tgUser.groups.map(group => group.name);
-        const groupOptions = this.groups.filter(group => !userGroupNames.includes(group))
+        const groupOptions = (await this.resolveGroups()).filter(group => !userGroupNames.includes(group))
         let currentActiveGroupsString = groupOptions.join(", ")
 
         const block = {
@@ -117,7 +150,7 @@ export class SelfServeApproval extends BaseProfile {
         let modal = await super.openModal(tgUser);
         const userGroupNames = tgUser.groups.map(group => group.name)
         // todo: add initial option
-        for (const group of this.groups) {
+        for (const group of await this.resolveGroups()) {
             // skip if the user already in the group
             if (userGroupNames.includes(group)) continue
             const option = {
@@ -255,7 +288,7 @@ export class SelfServeApproval extends BaseProfile {
         }
 
         // Make sure user is allowed to access selected group
-        if (typeof selectedGroup === "string" && !this.groups.includes(selectedGroup)) {
+        if (typeof selectedGroup === "string" && !(await this.resolveGroups()).includes(selectedGroup)) {
             return {ok: false, error: `User '${tgUser.email}' not allowed to access requested group '${selectedGroup}' in profile '${this.profileName}'`};
         }
 

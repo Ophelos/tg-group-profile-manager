@@ -54,6 +54,23 @@ export class SlackProfileManager {
     }
 
 
+    // Names of every Twingate group, read live (paged), for the profiles that
+    // offer groups by name suffix.
+    async listGroupNames() {
+        const query = "query GroupNames($endCursor:String){groups(first:100,after:$endCursor){pageInfo{hasNextPage endCursor}edges{node{name}}}}";
+        const names = [];
+        let endCursor = null;
+        for (;;) {
+            const response = await this.apiClient.exec(query, {endCursor});
+            const page = response.groups;
+            if (page == null || !Array.isArray(page.edges)) break;
+            for (const edge of page.edges) names.push(edge.node.name);
+            if (page.pageInfo?.hasNextPage !== true) break;
+            endCursor = page.pageInfo.endCursor;
+        }
+        return names;
+    }
+
     async fetchAllGroups(opts) {
         return this.apiClient._fetchAllNodesOfType("Group", opts);
     }
